@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+.env
+*.log
+FoodDataSet.json
+.streamlit/
+*.db
+chroma_db/
+*.sqlite3
+*.sqlite
+.DS_Store
+Thumbs.db
