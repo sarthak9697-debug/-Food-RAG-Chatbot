@@ -1,0 +1,264 @@
+# FOOD RAG CHATBOT - CLEAN DEPLOYMENT GUIDE
+# ============================================
+# This file contains ONLY the working code and steps for successful deployment.
+# All failed/experimental code has been removed.
+
+# ============================================
+# STEP 1: PROJECT STRUCTURE
+# ============================================
+# food-rag-chatbot/
+# ├── requirements.txt
+# ├── streamlit_app.py
+# ├── shared_functions.py
+# ├── FoodDataSet.json
+# ├── .gitignore
+# └── README.md
+
+# ============================================
+# STEP 2: requirements.txt (MINIMAL, WORKING)
+# ============================================
+streamlit==1.32.0
+chromadb==0.4.22
+sentence-transformers==2.2.2
+numpy==1.24.3
+scipy==1.10.1
+flask==2.3.3
+
+# Key versions that work on Streamlit Cloud:
+# - chromadb 0.4.22 (pre-built wheels, no Rust compilation)
+# - sentence-transformers 2.2.2 (lighter dependencies)
+# - numpy 1.24.3 / scipy 1.10.1 (compatible with Python 3.10-3.11)
+# - streamlit 1.32.0 (stable)
+
+# ============================================
+# STEP 3: shared_functions.py (CHROMADB 0.4.x COMPATIBLE)
+# ============================================
+import chromadb
+from chromadb.utils import embedding_functions
+import json
+from typing import List, Dict
+
+client = chromadb.Client()
+
+def load_food_data(file_path: str) -> List[Dict]:
+    with open(file_path, 'r', encoding='utf-8') as file:
+        food_data = json.load(file)
+    
+    for i, item in enumerate(food_data):
+        item['food_id'] = str(item.get('food_id', i + 1))
+        item.setdefault('food_ingredients', [])
+        item.setdefault('food_description', '')
+        item.setdefault('cuisine_type', 'Unknown')
+        item.setdefault('food_calories_per_serving', 0)
+        
+        if 'food_features' in item and isinstance(item['food_features'], dict):
+            item['taste_profile'] = ', '.join(str(v) for v in item['food_features'].values() if v)
+        else:
+            item['taste_profile'] = ''
+            
+    return food_data
+
+def create_similarity_search_collection(collection_name: str, collection_metadata: dict = None):
+    try:
+        client.delete_collection(collection_name)
+    except:
+        pass
+    
+    ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+    return client.create_collection(
+        name=collection_name,
+        metadata=collection_metadata,
+        embedding_function=ef
+    )
+
+def populate_similarity_collection(collection, food_items: List[Dict]):
+    documents, metadatas, ids = [], [], []
+    used_ids = set()
+
+    for i, food in enumerate(food_items):
+        text = f"Name: {food['food_name']}. Description: {food.get('food_description', '')}. "
+        text += f"Ingredients: {', '.join(food.get('food_ingredients', []))}. "
+        text += f"Cuisine: {food.get('cuisine_type', 'Unknown')}. "
+        text += f"Cooking method: {food.get('cooking_method', '')}. "
+        
+        if food.get('taste_profile'):
+            text += f"Taste: {food['taste_profile']}. "
+        if food.get('food_health_benefits'):
+            text += f"Health benefits: {food['food_health_benefits']}. "
+
+        base_id = str(food.get('food_id', i))
+        unique_id = base_id
+        counter = 1
+        while unique_id in used_ids:
+            unique_id = f"{base_id}_{counter}"
+            counter += 1
+        used_ids.add(unique_id)
+
+        documents.append(text)
+        ids.append(unique_id)
+        metadatas.append({
+            "name": food["food_name"],
+            "cuisine_type": food.get("cuisine_type", "Unknown"),
+            "ingredients": ", ".join(food.get("food_ingredients", [])),
+            "calories": food.get("food_calories_per_serving", 0),
+            "description": food.get("food_description", ""),
+            "cooking_method": food.get("cooking_method", ""),
+            "health_benefits": food.get("food_health_benefits", ""),
+            "taste_profile": food.get("taste_profile", "")
+        })
+
+    collection.add(documents=documents, metadatas=metadatas, ids=ids)
+
+def perform_similarity_search(collection, query: str, n_results: int = 5) -> List[Dict]:
+    try:
+        results = collection.query(query_texts=[query], n_results=n_results)
+        if not results or not results['ids'] or len(results['ids'][0]) == 0:
+            return []
+        
+        formatted = []
+        for i in range(len(results['ids'][0])):
+            score = 1 - results['distances'][0][i]
+            formatted.append({
+                'food_id': results['ids'][0][i],
+                'food_name': results['metadatas'][0][i]['name'],
+                'food_description': results['metadatas'][0][i].get('description', ''),
+                'cuisine_type': results['metadatas'][0][i].get('cuisine_type', 'Unknown'),
+                'food_calories_per_serving': results['metadatas'][0][i].get('calories', 0),
+                'similarity_score': score,
+            })
+        return formatted
+    except Exception as e:
+        print(f"Search error: {e}")
+        return []
+
+# ============================================
+# STEP 4: streamlit_app.py (SIMPLE, NO EXTERNAL APIs)
+# ============================================
+import streamlit as st
+from shared_functions import (
+    load_food_data,
+    create_similarity_search_collection,
+    populate_similarity_collection,
+    perform_similarity_search,
+)
+
+st.set_page_config(page_title="Food RAG Chatbot", page_icon="🍲")
+st.title("🍲 Food Recommendation Chatbot")
+
+@st.cache_resource
+def setup_vector_db():
+    food_data = load_food_data("./FoodDataSet.json")
+    collection = create_similarity_search_collection("streamlit_rag_food")
+    populate_similarity_collection(collection, food_data)
+    return collection
+
+with st.spinner("Loading food dataset..."):
+    collection = setup_vector_db()
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+if prompt := st.chat_input("Ask for food recommendations..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Searching..."):
+            results = perform_similarity_search(collection, prompt, n_results=3)
+            
+            if results:
+                response = "Top matches:\n\n"
+                for i, item in enumerate(results, 1):
+                    response += (
+                        f"{i}. **{item['food_name']}** ({item['cuisine_type']})\n"
+                        f"   Calories: {item['food_calories_per_serving']}\n"
+                        f"   Match: {item['similarity_score']*100:.1f}%\n"
+                        f"   {item['food_description'][:200]}...\n\n"
+                    )
+            else:
+                response = "No matches found. Try different keywords."
+            
+            st.markdown(response)
+            
+            if results:
+                with st.expander("Vector Matches"):
+                    for item in results:
+                        st.markdown(f"- **{item['food_name']}** | {item['cuisine_type']} | {item['food_calories_per_serving']} cal | {item['similarity_score']*100:.1f}%")
+
+    st.session_state.messages.append({"role": "assistant", "content": response})
+
+# ============================================
+# STEP 5: .gitignore
+# ============================================
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.log
+FoodDataSet.json
+.streamlit/
+*.db
+chroma_db/
+*.sqlite3
+.DS_Store
+
+# ============================================
+# STEP 6: DEPLOYMENT COMMANDS
+# ============================================
+
+# LOCAL DEVELOPMENT:
+# ------------------
+# pip install -r requirements.txt
+# streamlit run streamlit_app.py
+
+# GITHUB PUSH:
+# ------------
+# git init
+# git add .
+# git commit -m "Clean deployment"
+# git remote add origin https://github.com/YOUR_USERNAME/food-rag-chatbot.git
+# git branch -M main
+# git push -u origin main
+
+# STREAMLIT CLOUD DEPLOYMENT:
+# ---------------------------
+# 1. Go to https://share.streamlit.io
+# 2. Click "New app" -> Connect GitHub repo
+# 3. Repository: your-username/food-rag-chatbot
+# 4. Branch: main
+# 5. Main file path: streamlit_app.py
+# 6. Click "Deploy"
+
+# IMPORTANT NOTES:
+# ----------------
+# 1. FoodDataSet.json MUST be in the repo (not in .gitignore for deployment)
+#    - Either commit it, or add download logic in setup_vector_db()
+# 2. First deploy may take 3-5 minutes (model download)
+# 3. Uses in-memory ChromaDB (resets on each session - fine for demo)
+# 4. No external API keys needed (uses local embeddings)
+# 5. Python version: 3.10 or 3.11 recommended
+
+# ============================================
+# STEP 7: VERIFY BEFORE DEPLOY
+# ============================================
+# Run locally first:
+# python -c "from shared_functions import *; print('OK')"
+# streamlit run streamlit_app.py
+
+# ============================================
+# TROUBLESHOOTING COMMON ERRORS
+# ============================================
+# "metadata-generation-failed" -> Use chromadb==0.4.22 (not 1.x)
+# "Rust compilation failed" -> Use older chromadb with wheels
+# "ModuleNotFoundError: sentence_transformers" -> Use 2.2.2 version
+# "Memory error" -> Reduce n_results, use smaller model
+# "Port error" -> Streamlit Cloud handles port automatically
+
+# ============================================
+# END OF DEPLOYMENT GUIDE
+# ============================================
