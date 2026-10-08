@@ -51,10 +51,7 @@ def create_similarity_search_collection(collection_name: str, collection_metadat
     return client.create_collection(
         name=collection_name,
         metadata=collection_metadata,
-        configuration={
-            "hnsw": {"space": "cosine"},
-            "embedding_function": sentence_transformer_ef
-        }
+        embedding_function=sentence_transformer_ef
     )
 
 def populate_similarity_collection(collection, food_items: List[Dict]):
